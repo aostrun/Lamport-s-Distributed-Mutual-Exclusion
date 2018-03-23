@@ -3,14 +3,20 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <time.h>
 #include <sys/types.h>
-#include <queue>
+#include <deque>
 
 
-#define DEFAULT_NUM_OF_PHILOSOPHERS 2
+#define DEFAULT_NUM_OF_PHILOSOPHERS   3
+#define PHILOSOPHER_REQUEST_PROB      0.5
 
 #define PIPE_READ   0
 #define PIPE_WRITE  1
+
+#define REQUEST_MSG   "request"
+#define RESPONSE_MSG  "response"
+#define EXIT_MSG      "exit"
 
 typedef struct pipe_struct{
   int write_fds[2];
@@ -35,14 +41,40 @@ void print_message(message_t message){
   printf("[%d] Message: (%d, %d): %s\n", getpid(), message.id, message.time, message.msg);
 }
 
+int randomWithProb(double p){
+  double rndDouble = (double)rand() / RAND_MAX;
+  return rndDouble < p;
+}
 
 
-int philosopher(int id, duplex_pipe_t pipe){
+void create_response(message_t *message, int id, int loc_time){
+  message->id = id;
+  message->time = loc_time;
+  strcpy(message->msg, RESPONSE_MSG);
+}
 
-  std::queue<message_t> request_queue;
-  message_t request;
-  int local_logical_time;
-  int nwrite, nread;
+void create_request(message_t *message, int id, int loc_time){
+  message->id = id;
+  message->time = loc_time;
+  strcpy(message->msg, REQUEST_MSG);
+}
+
+void create_exit(message_t *message, int id, int loc_time){
+  message->id = id;
+  message->time = loc_time;
+  strcpy(message->msg, EXIT_MSG);
+}
+
+
+int philosopher(int id, duplex_pipe_t pipe, int philosophers_num){
+
+  std::deque<message_t> request_queue;
+  message_t request, response, message, tmp;
+  int local_logical_time = id;
+  int nwrite, nread, random_bool;
+  int responses = 0;
+  char wait_for_responses = 0;
+  srand(id + time(NULL));
 
   // Close the reading fd from the writing pipe
   // writing pipe will be used only for writing
@@ -58,15 +90,115 @@ int philosopher(int id, duplex_pipe_t pipe){
   // request access to the critical section
   request.id = id;
   request.time = local_logical_time;
-  strcpy(request.msg, "request");
 
 
 
-  nwrite = write(pipe.write_fds[PIPE_WRITE], &request, sizeof(request));
+
 
   while(1){
-    nread = read(pipe.read_fds[PIPE_READ], &request, sizeof(request));
-    print_message(request);
+
+    sleep(1);
+    // Randomly decide if philosopher want to request access to the table
+    // get the LSB of the random value == boolean random
+    if(wait_for_responses == 0 && randomWithProb(PHILOSOPHER_REQUEST_PROB)){
+        // Create request, add it to the local queue and broadcast it to
+        // other processes and wait for the responses
+        printf("%d wants to access the table %d...\n", id, local_logical_time);
+        create_request(&request, id, local_logical_time);
+        nwrite = write(pipe.write_fds[PIPE_WRITE], &request, sizeof(request));
+        if(!request_queue.empty()){
+          wait_for_responses = 2;
+        }else{
+          wait_for_responses = 1;
+        }
+        request_queue.push_back(request);
+        responses = 0;
+    }
+
+    // Read from pipe
+    nread = read(pipe.read_fds[PIPE_READ], &message, sizeof(message));
+
+    // Increment local logical time when new message arrives
+    // local_time = max{local_time, message.time} + 1
+    local_logical_time = (local_logical_time < message.time ? message.time : local_logical_time) + 1;
+
+    // Parse the received message
+    if(strncmp(message.msg, REQUEST_MSG, strlen(REQUEST_MSG)) == 0){
+        // Received msg is a request
+        if(wait_for_responses){
+          // Process also wants to access the table
+          // check if the request had lower time value
+          if(message.time < request.time){
+            // Respond to the request, this process has to wait
+            printf("\t%d has to wait, %d has advantage\n", id, message.id);
+            create_response(&response, message.id, local_logical_time);
+            request_queue.push_front(message);
+            wait_for_responses = 2;
+            nwrite = write(pipe.write_fds[PIPE_WRITE], &response, sizeof(response));
+          }else{
+            // This process has the advantage
+            request_queue.push_back(message);
+          }
+        }else{
+          // Respond to the request
+          create_response(&response, message.id, local_logical_time);
+          request_queue.push_back(message);
+          nwrite = write(pipe.write_fds[PIPE_WRITE], &response, sizeof(response));
+
+        }
+    }else if(strncmp(message.msg, RESPONSE_MSG, strlen(RESPONSE_MSG)) == 0){
+        // Received msg is a response
+        responses++;
+        printf("%d got response, #: %d, wfr: %d\n", id, responses, wait_for_responses);
+    }else if(strncmp(message.msg, EXIT_MSG, strlen(EXIT_MSG)) == 0){
+        // Exit message arrived, pop the front request from queue
+        printf("%d got exit: %d, %d\n", id, wait_for_responses, responses);
+        tmp = request_queue.front();
+        printf("%d removing (%d, %d)\n", id, tmp.id, tmp.time);
+        request_queue.pop_front();
+        if(wait_for_responses == 2){
+          responses++;
+          // If this process wants to access the table but was not in
+          // front of the queue before, check the next request in the queue
+          // if next request is "mine", set wait_for_responses to 1
+          message = request_queue.front();
+          if(message.id == id){
+            wait_for_responses = 1;
+          }else{
+            printf("\t%d has next in line (%d, %d)\n", id, message.id, message.time);
+          }
+        }
+    }
+
+
+    if(wait_for_responses == 1 && responses == (philosophers_num - 1)){
+      // All processes sent responses, access the table
+      printf("%d accessing table...\n", id);
+      sleep(2);
+      // Remove own request from queue
+      request_queue.pop_front();
+      wait_for_responses = 0;
+      responses = 0;
+
+      printf("%d leaving table...\n", id);
+      create_exit(&response, id, request.time);
+      print_message(response);
+      nwrite = write(pipe.write_fds[PIPE_WRITE], &response, sizeof(response));
+
+      /*
+      while(!request_queue.empty()){
+        // While there is a request on a local queue, respond to it
+        request = request_queue.front();
+        request_queue.pop_front();
+
+        create_response(response, request.id, local_logical_time);
+        nwrite = write(pipe.write_fds[PIPE_WRITE], &response, sizeof(response));
+
+      }
+      */
+    }
+
+    //print_message(message);
   }
 
   exit(0);
@@ -106,7 +238,9 @@ int main(int argc, char *argv[]){
   for(int i=0; i < philosophers_n; i++){
     if(fork() == 0){
       // Child process
-      philosopher(i+1, pipes[i]);
+      printf("Created child %d:%d\n", i+1, getpid());
+      philosopher(i+1, pipes[i], philosophers_n);
+      break;
     }else{
       // Parent process
       // Close the writing fd from the writing pipe
@@ -123,6 +257,10 @@ int main(int argc, char *argv[]){
 
   message_t req_msg;
   int nread, nwrite;
+  /**
+    * Parent process is used as router for messages (requests)
+    * between pipes (child processes).
+   */
   while(1){
     // Route messages from children to other children
     for(int i = 0; i < philosophers_n; i++){
@@ -134,7 +272,7 @@ int main(int argc, char *argv[]){
           //EOF
         }else{
           // Read message, forward it to the destination process
-          print_message(req_msg);
+          //print_message(req_msg);
           if(i == (req_msg.id - 1) ){
             // Request was sent by the process,
             // broadcast it to other processes
