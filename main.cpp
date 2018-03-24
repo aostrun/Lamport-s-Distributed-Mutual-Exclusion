@@ -6,7 +6,7 @@
 #include <time.h>
 #include <sys/types.h>
 #include <deque>
-
+#include <algorithm>
 
 #define DEFAULT_NUM_OF_PHILOSOPHERS   3
 #define PHILOSOPHER_REQUEST_PROB      0.5
@@ -27,8 +27,13 @@ typedef struct msg_type{
   int id;
   int time;
   char msg[10];
+
 } message_t;
 
+
+bool msg_sort(message_t i, message_t j){
+  return i.time < j.time;
+}
 
 void pipe_print(duplex_pipe_t pipe){
   printf("Pipe: write[%d][%d], read[%d][%d]\n", pipe.write_fds[0],
@@ -70,7 +75,7 @@ int philosopher(int id, duplex_pipe_t pipe, int philosophers_num){
 
   std::deque<message_t> request_queue;
   message_t request, response, message, tmp;
-  int local_logical_time = id;
+  int local_logical_time = id * 200;
   int nwrite, nread, random_bool;
   int responses = 0;
   char wait_for_responses = 0;
@@ -106,13 +111,13 @@ int philosopher(int id, duplex_pipe_t pipe, int philosophers_num){
         printf("%d wants to access the table %d...\n", id, local_logical_time);
         create_request(&request, id, local_logical_time);
         nwrite = write(pipe.write_fds[PIPE_WRITE], &request, sizeof(request));
-        if(!request_queue.empty()){
-          wait_for_responses = 2;
-        }else{
-          wait_for_responses = 1;
-        }
+        wait_for_responses = 1;
         request_queue.push_back(request);
         responses = 0;
+    }
+
+    if(!request_queue.empty()){
+      std::sort(request_queue.begin(), request_queue.end(), msg_sort);
     }
 
     // Read from pipe
@@ -125,6 +130,7 @@ int philosopher(int id, duplex_pipe_t pipe, int philosophers_num){
     // Parse the received message
     if(strncmp(message.msg, REQUEST_MSG, strlen(REQUEST_MSG)) == 0){
         // Received msg is a request
+        /*
         if(wait_for_responses){
           // Process also wants to access the table
           // check if the request had lower time value
@@ -140,38 +146,35 @@ int philosopher(int id, duplex_pipe_t pipe, int philosophers_num){
             request_queue.push_back(message);
           }
         }else{
-          // Respond to the request
-          create_response(&response, message.id, local_logical_time);
-          request_queue.push_back(message);
-          nwrite = write(pipe.write_fds[PIPE_WRITE], &response, sizeof(response));
+        */
+        // Respond to the request
+        create_response(&response, message.id, local_logical_time);
+        request_queue.push_back(message);
+        nwrite = write(pipe.write_fds[PIPE_WRITE], &response, sizeof(response));
 
-        }
+
     }else if(strncmp(message.msg, RESPONSE_MSG, strlen(RESPONSE_MSG)) == 0){
         // Received msg is a response
         responses++;
         printf("%d got response, #: %d, wfr: %d\n", id, responses, wait_for_responses);
     }else if(strncmp(message.msg, EXIT_MSG, strlen(EXIT_MSG)) == 0){
         // Exit message arrived, pop the front request from queue
-        printf("%d got exit: %d, %d\n", id, wait_for_responses, responses);
+
         tmp = request_queue.front();
         printf("%d removing (%d, %d)\n", id, tmp.id, tmp.time);
         request_queue.pop_front();
-        if(wait_for_responses == 2){
-          responses++;
+        if(wait_for_responses){
           // If this process wants to access the table but was not in
           // front of the queue before, check the next request in the queue
           // if next request is "mine", set wait_for_responses to 1
           message = request_queue.front();
-          if(message.id == id){
-            wait_for_responses = 1;
-          }else{
-            printf("\t%d has next in line (%d, %d)\n", id, message.id, message.time);
-          }
+          printf("\t%d has next in line (%d, %d)\n", id, message.id, message.time);
+
         }
     }
 
-
-    if(wait_for_responses == 1 && responses == (philosophers_num - 1)){
+    tmp = request_queue.front();
+    if(tmp.id == id && responses >= (philosophers_num - 1)){
       // All processes sent responses, access the table
       printf("%d accessing table...\n", id);
       sleep(2);
