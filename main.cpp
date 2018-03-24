@@ -1,3 +1,11 @@
+/**
+  * Author: Andrijan Ostrun
+  *         2018.
+  * N Philosophers problem
+  * Lamport's Distributed Mutual Exclusion algorithm
+  *  using POSIX pipes.
+  */
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -8,7 +16,7 @@
 #include <deque>
 #include <algorithm>
 
-#define DEFAULT_NUM_OF_PHILOSOPHERS   3
+#define DEFAULT_NUM_OF_PHILOSOPHERS   10
 #define PHILOSOPHER_REQUEST_PROB      0.5
 
 #define PIPE_READ   0
